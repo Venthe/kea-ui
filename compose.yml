@@ -1,0 +1,76 @@
+services:
+
+  kea-dhcp4:
+    image: "docker.cloudsmith.io/isc/docker/kea-dhcp4:${KEA_IMAGE_VERSION:-3.2.0-20260713}"
+    container_name: "kea-dhcp4"
+    restart: "always"
+    networks:
+      test-network:
+        ipv4_address: "192.168.50.10"
+    cap_add:
+      - "NET_ADMIN"
+      - "NET_RAW"
+    volumes:
+      - "./config/kea-dhcp4.conf:/etc/kea/kea-dhcp4.conf:ro"
+      - "kea-var-lib:/var/lib/kea/"
+      - "kea-var-run:/var/run/kea"
+
+  kea-ui:
+    build: .
+    container_name: "kea-ui"
+    restart: "unless-stopped"
+    ports:
+      - "8000:8000"
+    networks:
+      test-network:
+        ipv4_address: "192.168.50.13"
+      default: {}
+    environment:
+      KEA_UI_USERNAME: "${KEA_UI_USERNAME:-admin}"
+      KEA_UI_PASSWORD: "${KEA_UI_PASSWORD:-secret}"
+      KEA_UI_SESSION_SECRET: "${KEA_UI_SESSION_SECRET:-salt}"
+      AUTH_CONFIG_PATH: "/data/auth.json"
+      KEA_SOCKET_PATH: "/var/run/kea/dhcp4.sock"
+      # Set KEA_CONTROL_URL instead when using Kea's HTTP control socket.
+      KEA_CONFIG_PATH: "/config/kea-dhcp4.conf"
+      LEASE_FILE_PATH: "/leases/dhcp4.leases"
+      RESERVATIONS_PATH: "/data/reservations.json"
+    volumes:
+      - "kea-ui-data:/data"
+      - "./config/kea-dhcp4.conf:/config/kea-dhcp4.conf:ro"
+      - "kea-var-lib:/leases:ro"
+      - "kea-var-run:/var/run/kea"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "10s"
+    depends_on:
+      - "kea-dhcp4"
+
+  network-multitool:
+    container_name: "network-multitool"
+    image: "docker.io/wbitt/network-multitool:3.22.2-extra"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    networks:
+      test-network:
+        ipv4_address: "192.168.50.40"
+      default: {}
+
+volumes:
+  kea-var-run: {}
+  kea-var-lib: {}
+  kea-ui-data: {}
+
+networks:
+  test-network:
+    driver: macvlan
+    driver_opts:
+      parent: eth0
+    ipam:
+      config:
+        - subnet: 192.168.50.0/24
+          gateway: 192.168.50.1

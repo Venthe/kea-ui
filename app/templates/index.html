@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kea UI</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; background: #eef2f5; color: #17202a; }
+    body { margin: 0; }
+    header { background: #17324d; color: white; padding: 1.5rem max(1rem, calc((100% - 1200px) / 2)); }
+    main { max-width: 1200px; margin: 1.5rem auto; padding: 0 1rem 3rem; }
+    h1, h2 { margin: 0; } h2 { margin-bottom: 1rem; font-size: 1.15rem; }
+    section { background: white; border: 1px solid #d8e0e7; border-radius: 6px; padding: 1.25rem; margin-bottom: 1.25rem; box-shadow: 0 2px 8px #17324d12; }
+    .error { display: flex; justify-content: space-between; gap: 1rem; border-left: 4px solid #ba2d35; background: #fff2f2; padding: .75rem; margin-bottom: 1rem; overflow-wrap: anywhere; }
+    .dismiss { border: 0; background: transparent; color: #742027; padding: 0 .25rem; font-size: 1.15rem; line-height: 1; }
+    form.add { display: grid; grid-template-columns: repeat(4, 1fr) auto; gap: .75rem; align-items: end; }
+    label { display: grid; gap: .3rem; font-size: .8rem; color: #52606d; }
+    input { box-sizing: border-box; width: 100%; padding: .6rem; border: 1px solid #b8c4ce; border-radius: 4px; font: inherit; }
+    button { padding: .6rem .8rem; border: 0; border-radius: 4px; background: #167d8d; color: white; font: inherit; cursor: pointer; }
+    button.delete { background: #ba2d35; padding: .35rem .55rem; font-size: .85rem; }
+    .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .65rem .5rem; border-bottom: 1px solid #e5eaee; white-space: nowrap; }
+    th { color: #52606d; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+    .empty { color: #687782; }
+    .header-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .logout { background: #52606d; padding: .4rem .7rem; font-size: .85rem; }
+    .status-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .75rem; margin-top: 1rem; }
+    .status-item { padding: .7rem; background: #f4f7f9; border: 1px solid #e1e7eb; border-radius: 4px; }
+    .status-item dt { color: #687782; font-size: .75rem; } .status-item dd { margin: .25rem 0 0; overflow-wrap: anywhere; }
+    .status-details { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+    .status-details pre { max-height: 180px; overflow: auto; background: #17202a; color: #dce7ed; padding: .75rem; border-radius: 4px; font-size: .75rem; }
+    .ok { color: #14734b; } .bad { color: #a42832; }
+    .for-pre { white-space: break-spaces; }
+    @media (max-width: 760px) { form.add { grid-template-columns: 1fr 1fr; } form.add button { grid-column: span 2; } }
+  </style>
+</head>
+<body>
+  <header><div class="header-row"><h1>Kea UI</h1><form method="post" action="/logout"><button class="logout" type="submit">Sign out</button></form></div></header>
+  <main>
+    {% if error %}<div class="error" role="alert"><span><strong>Operation failed:</strong> {{ error }}</span><button class="dismiss" type="button" aria-label="Dismiss notification" title="Dismiss notification">&times;</button></div>{% endif %}
+    <section>
+      <h2>Kea status</h2>
+      {% if status.error %}<div class="error"><span>{{ status.error }}</span></div>{% else %}
+      <dl class="status-grid">
+        <div class="status-item"><dt>Version</dt><dd>{{ status.version }}</dd></div>
+        <div class="status-item"><dt>PID</dt><dd>{{ status.pid }}</dd></div>
+        <div class="status-item"><dt>Uptime</dt><dd>{{ status.uptime }} seconds</dd></div>
+        <div class="status-item"><dt>Last reload</dt><dd>{{ status.reload }} seconds ago</dd></div>
+        <div class="status-item"><dt>Socket</dt><dd class="{{ 'ok' if status.sockets.get('status') == 'ready' else 'bad' }}">{{ status.sockets.get('status', 'unknown') }}</dd></div>
+        <div class="status-item"><dt>Lease backend</dt><dd>{{ status.lease_backend }}</dd></div>
+        <div class="status-item"><dt>Multithreading</dt><dd>{{ status.multi_threading }}</dd></div>
+        <div class="status-item"><dt>Queue</dt><dd>{{ status.thread_pool_size }} threads / {{ status.packet_queue_size }} packets</dd></div>
+      </dl>
+      <div class="status-details">
+        <div><strong>DHCP state</strong><pre class="for-pre">{{ status.dhcp_state | tojson(indent=2) }}</pre></div>
+        <div><strong>Configured subnets</strong><pre class="for-pre">{{ status.subnets | tojson(indent=2) }}</pre></div>
+        <div><strong>Loaded hooks</strong><pre class="for-pre">{{ status.hooks | tojson(indent=2) }}</pre></div>
+        <div><strong>Supported commands</strong><pre class="for-pre">{{ status.commands | join(', ') }}</pre></div>
+      </div>
+      {% endif %}
+    </section>
+    <section>
+      <h2>Static reservations</h2>
+      <form class="add" method="post" action="/reservations">
+        <label>Subnet ID <input name="subnet_id" value="1" required inputmode="numeric"></label>
+        <label>MAC address <input name="hw_address" placeholder="aa:bb:cc:dd:ee:ff" required></label>
+        <label>IP address <input name="ip_address" placeholder="192.168.50.50" required></label>
+        <label>Hostname <input name="hostname" placeholder="nas"></label>
+        <button type="submit">Assign lease</button>
+      </form>
+      <div class="table-wrap" style="margin-top:1rem">
+        <table><thead><tr><th>Subnet</th><th>MAC</th><th>IP</th><th>Hostname</th><th></th></tr></thead><tbody>
+          {% for reservation in reservations %}
+          <tr><td>{{ reservation.get('subnet-id', '') }}</td><td>{{ reservation.get('hw-address', '') }}</td><td>{{ reservation.get('ip-address', '') }}</td><td>{{ reservation.get('hostname', '') }}</td><td><form method="post" action="/reservations/delete"><input type="hidden" name="hw_address" value="{{ reservation.get('hw-address', '') }}"><button class="delete" type="submit">Delete</button></form></td></tr>
+          {% else %}<tr><td class="empty" colspan="5">No static reservations configured.</td></tr>{% endfor %}
+        </tbody></table>
+      </div>
+    </section>
+    <section>
+      <h2>Active DHCP leases <small>({{ leases|length }})</small></h2>
+      <div class="table-wrap"><table><thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>State</th><th>Expires</th><th></th></tr></thead><tbody>
+        {% for lease in leases %}
+        <tr><td>{{ lease.get('address', '') }}</td><td>{{ lease.get('hwaddr', '') }}</td><td>{{ lease.get('hostname', '') }}</td><td title="Kea state {{ lease.get('state', '') }}">{{ lease.get('state_label', 'unknown') }} ({{ lease.get('state', '') }})</td><td>{{ lease.get('expire_at', '') }}</td><td><form method="post" action="/leases/delete"><input type="hidden" name="ip_address" value="{{ lease.get('address', '') }}"><button class="delete" type="submit">Remove</button></form></td></tr>
+        {% else %}<tr><td class="empty" colspan="6">No leases returned by Kea.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+  </main>
+  <script>
+    document.querySelectorAll('.dismiss').forEach(button => {
+      button.addEventListener('click', () => button.closest('[role="alert"]').remove());
+    });
+    const body = document.querySelector('section:last-of-type tbody');
+    const count = document.querySelector('section:last-of-type h2 small');
+    const cell = value => document.createTextNode(value ?? '');
+    function renderLeases(leases) {
+      body.replaceChildren();
+      count.textContent = `(${leases.length})`;
+      if (!leases.length) {
+        const row = document.createElement('tr');
+        const empty = document.createElement('td');
+        empty.colSpan = 6;
+        empty.className = 'empty';
+        empty.textContent = 'No leases returned by Kea.';
+        row.append(empty);
+        body.append(row);
+        return;
+      }
+      for (const lease of leases) {
+        const row = document.createElement('tr');
+        for (const value of [lease.address, lease.hwaddr, lease.hostname, lease.state_label ?? 'unknown', lease.expire_at]) {
+          const column = document.createElement('td');
+          column.append(cell(value));
+          row.append(column);
+        }
+        const actions = document.createElement('td');
+        const form = document.createElement('form');
+        form.method = 'post';
+        form.action = '/leases/delete';
+        const address = document.createElement('input');
+        address.type = 'hidden';
+        address.name = 'ip_address';
+        address.value = lease.address ?? '';
+        const remove = document.createElement('button');
+        remove.className = 'delete';
+        remove.type = 'submit';
+        remove.textContent = 'Remove';
+        form.append(address, remove);
+        actions.append(form);
+        row.append(actions);
+        body.append(row);
+      }
+    }
+    const stream = new EventSource('/events');
+    stream.onmessage = event => renderLeases(JSON.parse(event.data));
+  </script>
+</body>
+</html>
