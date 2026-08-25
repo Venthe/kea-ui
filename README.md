@@ -1,3 +1,7 @@
+![Docker Image Version](https://img.shields.io/docker/v/venthe/kea-ui?link=https%3A%2F%2Fhub.docker.com%2Fr%2Fventhe%2Fkea-ui)
+
+Docker image: [here](https://hub.docker.com/r/venthe/kea-ui)
+
 # WARNING: Initial commit is an agentic, almost one-shot. It should NEVER BE USED in ANY capacity
 
 without scrutiny.
