@@ -16,6 +16,7 @@ services:
       - "kea-var-run:/var/run/kea"
 
   kea-ui:
+    image: docker.io/venthe/kea-ui:latest
     build: .
     container_name: "kea-ui"
     restart: "unless-stopped"
@@ -66,6 +67,7 @@ volumes:
   kea-ui-data: {}
 
 networks:
+  default: {}
   test-network:
     driver: macvlan
     driver_opts:

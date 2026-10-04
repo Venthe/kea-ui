@@ -5,26 +5,33 @@ import base64
 import hashlib
 import hmac
 import ipaddress
-import csv
+# import csv
 import json
 import os
 import re
-import socket
+# import socket
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
+import ssl
 import httpx
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-KEA_SOCKET_PATH = os.getenv("KEA_SOCKET_PATH", "/var/run/kea/dhcp4.sock")
-KEA_CONTROL_URL = os.getenv("KEA_CONTROL_URL", "").strip()
-KEA_CONFIG_PATH = Path(os.getenv("KEA_CONFIG_PATH", "/config/kea-dhcp4.conf"))
-LEASE_FILE_PATH = Path(os.getenv("LEASE_FILE_PATH", "/leases/dhcp4.leases"))
+KEA_CONTROL_URL = os.getenv(
+    "KEA_CONTROL_URL",
+    "https://192.168.50.10:8000/",
+).strip()
+
+KEA_CA = Path(os.getenv("KEA_CA", "/run/secrets/ca.crt"))
+KEA_CLIENT_CERT = Path(os.getenv("KEA_CLIENT_CERT", "/run/secrets/client.crt"))
+KEA_CLIENT_KEY = Path(os.getenv("KEA_CLIENT_KEY", "/run/secrets/client.key"))
 RESERVATIONS_PATH = Path(os.getenv("RESERVATIONS_PATH", "/data/reservations.json"))
+RESERVATIONS_MIGRATION_MARKER = Path(
+    os.getenv("RESERVATIONS_MIGRATION_MARKER", "/data/reservations.migrated")
+)
 AUTH_CONFIG_PATH = Path(os.getenv("AUTH_CONFIG_PATH", "/data/auth.json"))
 KEA_TIMEOUT = float(os.getenv("KEA_TIMEOUT", "5"))
 UI_USERNAME = os.getenv("KEA_UI_USERNAME", "").strip()
@@ -37,11 +44,22 @@ LEASE_STATES = {
     2: "expired-reclaimed",
     3: "released",
 }
+ssl_context = ssl.create_default_context(
+    cafile=KEA_CA,
+)
 
+ssl_context.load_cert_chain(
+    certfile=KEA_CLIENT_CERT,
+    keyfile=KEA_CLIENT_KEY,
+)
 app = FastAPI(title="Kea UI")
 templates = Jinja2Templates(directory="app/templates")
 mutation_lock = asyncio.Lock()
-
+kea_http = httpx.Client(
+    verify=ssl_context,
+    timeout=KEA_TIMEOUT,
+    trust_env=False,
+)
 
 def read_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as file:
@@ -67,14 +85,26 @@ def write_json_atomic(path: Path, value: Any) -> None:
             pass
         raise
 
+def kea_config() -> dict[str, Any]:
+    result = kea_request("config-get")
+    return result.get("arguments", {})
+
+def configured_subnet_ids() -> list[int]:
+    config = kea_config()
+    return [int(subnet["id"]) for subnet in config.get("Dhcp4", {}).get("subnet4", [])]
+
 
 def load_reservations() -> list[dict[str, Any]]:
-    if not RESERVATIONS_PATH.exists():
-        write_json_atomic(RESERVATIONS_PATH, [])
-    value = read_json(RESERVATIONS_PATH)
-    if not isinstance(value, list):
-        raise ValueError("reservations file must contain a JSON array")
-    return value
+    reservations: list[dict[str, Any]] = []
+    for subnet_id in configured_subnet_ids():
+        result = kea_request(
+            "reservation-get-all",
+            {"subnet-id": subnet_id},
+            allow_empty=True,
+        )
+        hosts = result.get("arguments", {}).get("hosts", [])
+        reservations.extend(host for host in hosts if isinstance(host, dict))
+    return reservations
 
 
 def auth_settings() -> tuple[str, str, str]:
@@ -103,17 +133,19 @@ def authenticated(request: Request) -> bool:
 
 
 def load_leases() -> list[dict[str, Any]]:
-    try:
-        result = kea_request("lease4-get-all", allow_empty=True)
-        leases = result.get("arguments", {}).get("leases", [])
-        return [normalize_lease(lease) for lease in leases]
-    except RuntimeError as exc:
-        if "not supported" not in str(exc).lower():
-            raise
-    if not LEASE_FILE_PATH.exists():
-        return []
-    with LEASE_FILE_PATH.open(newline="", encoding="utf-8") as file:
-        return [normalize_lease(lease) for lease in csv.DictReader(file)]
+    result = kea_request(
+        "lease4-get-all",
+        {
+            "subnets": [1]
+        }
+    )
+
+    leases = result.get("arguments", {}).get("leases", [])
+
+    return [
+        normalize_lease(lease)
+        for lease in leases
+    ]
 
 
 def normalize_lease(lease: dict[str, Any]) -> dict[str, Any]:
@@ -136,58 +168,43 @@ def normalize_lease(lease: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def candidate_config(reservations: list[dict[str, Any]]) -> dict[str, Any]:
-    config = read_json(KEA_CONFIG_PATH)
-    dhcp4 = config.setdefault("Dhcp4", {})
-    subnets = dhcp4.get("subnet4", [])
-    reservations_by_subnet: dict[int, list[dict[str, Any]]] = {}
-    for reservation in reservations:
-        subnet_id = int(reservation["subnet-id"])
-        reservations_by_subnet.setdefault(subnet_id, []).append(reservation)
-    for subnet in subnets:
-        subnet["reservations"] = [
-            {key: value for key, value in reservation.items() if key != "subnet-id"}
-            for reservation in reservations_by_subnet.get(int(subnet["id"]), [])
-        ]
-    return config
-
-
 def kea_request(
     command: str,
     arguments: dict[str, Any] | None = None,
     allow_empty: bool = False,
-) -> Any:
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"command": command}
+
     if arguments is not None:
         payload["arguments"] = arguments
-    if KEA_CONTROL_URL:
-        response = httpx.post(KEA_CONTROL_URL, json=payload, timeout=KEA_TIMEOUT)
-        response.raise_for_status()
-        result = response.json()
-        if isinstance(result, list):
-            result = result[0] if result else {}
-        result_code = result.get("result", 0)
-        if result_code != 0 and not (allow_empty and result_code == 3):
-            raise RuntimeError(result.get("text", "Kea rejected the request"))
-        return result
 
-    request = (json.dumps(payload) + "\n").encode()
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(KEA_TIMEOUT)
-        client.connect(KEA_SOCKET_PATH)
-        client.sendall(request)
-        chunks = []
-        while True:
-            chunk = client.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if b"\n" in chunk:
-                break
-    result = json.loads(b"".join(chunks).splitlines()[0])
+    response = kea_http.post(
+        KEA_CONTROL_URL,
+        json=payload,
+        timeout=KEA_TIMEOUT,
+    )
+    response.raise_for_status()
+
+    result = response.json()
+
+    # Kea HTTP control responses are returned as a one-element list.
+    if isinstance(result, list):
+        if not result:
+            raise RuntimeError("Kea returned an empty response")
+        result = result[0]
+
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid response from Kea")
+
     result_code = result.get("result", 0)
-    if result_code != 0 and not (allow_empty and result_code == 3):
-        raise RuntimeError(result.get("text", "Kea rejected the request"))
+
+    if result_code != 0 and not (
+        allow_empty and result_code == 3
+    ):
+        raise RuntimeError(
+            result.get("text", "Kea rejected the request")
+        )
+
     return result
 
 
@@ -222,29 +239,6 @@ def validate_reservation(
         reservation["hostname"] = reservation["hostname"].strip()
     else:
         reservation.pop("hostname", None)
-
-
-async def apply_reservations(reservations: list[dict[str, Any]]) -> None:
-    config = candidate_config(reservations)
-    kea_request("config-test", {"Dhcp4": config["Dhcp4"]})
-    kea_request("config-set", {"Dhcp4": config["Dhcp4"]})
-    write_json_atomic(RESERVATIONS_PATH, reservations)
-
-
-async def reconcile_reservations() -> None:
-    while True:
-        try:
-            reservations = load_reservations()
-            if reservations:
-                await apply_reservations(reservations)
-            return
-        except Exception:
-            await asyncio.sleep(5)
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    asyncio.create_task(reconcile_reservations())
 
 
 @app.middleware("http")
@@ -353,7 +347,7 @@ async def index(request: Request, error: str | None = None) -> HTMLResponse:
     try:
         leases = await asyncio.to_thread(load_leases)
     except Exception as exc:
-        api_error = f"Unable to read lease file: {exc}"
+        api_error = f"Unable to read leases from Kea: {exc}"
     try:
         reservations = load_reservations()
     except Exception as exc:
@@ -386,7 +380,7 @@ async def add_reservation(
                 "ip-address": ip_address,
                 "hostname": hostname,
             }
-            config = read_json(KEA_CONFIG_PATH)
+            config = kea_config()
             validate_reservation(reservation, config, reservations)
             leases = await asyncio.to_thread(load_leases)
             conflicting_lease = next(
@@ -401,7 +395,10 @@ async def add_reservation(
                 raise ValueError(
                     f"IP address is currently leased to {conflicting_lease.get('hwaddr', 'another client')}"
                 )
-            await apply_reservations(reservations + [reservation])
+            kea_request(
+                "reservation-add",
+                {"reservation": reservation, "operation-target": "database"},
+            )
     except Exception as exc:
         return RedirectResponse(f"/?error={str(exc)}", status_code=303)
     return RedirectResponse("/", status_code=303)
@@ -419,17 +416,51 @@ async def delete_reservation(hw_address: str = Form(...)) -> RedirectResponse:
             ]
             if len(remaining) == len(reservations):
                 raise ValueError("reservation not found")
-            await apply_reservations(remaining)
+            target = next(
+                item
+                for item in reservations
+                if str(item.get("hw-address", "")).strip().lower()
+                == hw_address.strip().lower()
+            )
+            kea_request(
+                "reservation-del",
+                {
+                    "subnet-id": int(target["subnet-id"]),
+                    "identifier-type": "hw-address",
+                    "identifier": hw_address.strip().lower(),
+                    "operation-target": "database",
+                },
+            )
     except Exception as exc:
         return RedirectResponse(f"/?error={str(exc)}", status_code=303)
     return RedirectResponse("/", status_code=303)
 
 
 @app.post("/leases/delete")
-async def delete_lease(ip_address: str = Form(...)) -> RedirectResponse:
+async def delete_lease(
+    ip_address: str = Form(...),
+    subnet_id: int = Form(...),
+) -> RedirectResponse:
     try:
-        ipaddress.ip_address(ip_address.strip())
-        kea_request("lease4-del", {"ip-address": ip_address.strip()}, allow_empty=True)
+        ip_address = ip_address.strip()
+        ipaddress.ip_address(ip_address)
+
+        result = kea_request(
+            "lease4-del",
+            {
+             #   "subnet-id": subnet_id,
+                "ip-address": ip_address,
+                "update-ddns": True,
+            },
+        )
+
+        if result.get("result") == 3:
+            raise ValueError(f"Lease {ip_address} was not found")
+
     except Exception as exc:
-        return RedirectResponse(f"/?error={str(exc)}", status_code=303)
+        return RedirectResponse(
+            f"/?error={exc}",
+            status_code=303,
+        )
+
     return RedirectResponse("/", status_code=303)
